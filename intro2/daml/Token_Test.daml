@@ -1,0 +1,302 @@
+-- Copyright (c) 2024 Digital Asset (Switzerland) GmbH and/or its affiliates. All rights reserved.
+-- SPDX-License-Identifier: Apache-2.0
+
+
+module Token_Test where
+
+import Daml.Script
+
+-- Records for rich data structures
+data Bank = Bank with
+    party: Party
+    address: Text
+    telephone: Text
+  deriving (Eq, Show)
+
+data AccountKey = AccountKey with
+    accountant: Party
+    number: Text
+    bank_party: Party
+  deriving (Eq, Show)
+
+data AccountData = AccountData with
+    owner: Party
+    number: Text
+    bank: Bank             -- Nesting the Bank Record
+  deriving (Eq, Show)
+
+data Cash = Cash with
+    currency: Text
+    amount: Decimal
+  deriving (Eq, Show)
+
+-- Enhanced Token template with rich data and Contract Key
+template Account
+  with
+    accountant : Party
+    owner : Party
+    number : Text
+    bank : Bank
+  where
+    signatory accountant
+    key AccountKey with
+        accountant
+        number
+        bank_party = bank.party
+      : AccountKey
+    maintainer key.accountant
+
+    -- Choice to update bank telephone
+    choice UpdatePhone : ContractId Account
+      with
+        newPhone : Text
+      controller accountant
+      do
+        create this with bank = bank with telephone = newPhone
+
+    -- Choice to transfer ownership
+    choice Transfer : ContractId Account
+      with
+        newOwner : Party
+      controller owner
+      do
+        assertMsg "Cannot transfer to current owner" (owner /= newOwner)
+        create this with owner = newOwner
+
+template CashBalance
+  with
+    accountant : Party
+    cash : Cash
+    account : AccountKey  -- Now references the stable key!
+  where
+    signatory accountant
+
+    -- Choice to deposit money
+    choice Deposit : ContractId CashBalance
+      with
+        amount : Decimal
+      controller accountant
+      do
+        let newCash = cash with amount = cash.amount + amount
+        create this with cash = newCash
+
+    -- Non-consuming choice to check balance
+    nonconsuming choice CheckBalance : Decimal
+      controller accountant
+      do
+        return cash.amount
+
+-- The Token template from section 1
+template Token
+  with
+    owner : Party
+  where
+    signatory owner
+
+    -- Choice to transfer token
+    choice TransferToken : ContractId Token
+      with
+        newOwner : Party
+      controller owner
+      do
+        assertMsg "Cannot transfer to yourself" (owner /= newOwner)
+        create this with owner = newOwner
+
+-- Daml Scripts are specified as top-level variables of type `Script a`. `do` always
+-- introduces a block.
+token_test = script do
+
+  -- The `allocateParty` function allocates a new party.
+  -- The `<-` notation _binds_ the result to a variable.
+  alice <- allocateParty "Alice"
+
+  -- The `submit` keyword allows a party to submit a transaction to the ledger.
+  -- Bob and Alice can self-issue tokens as their authority is available to sign the
+  -- Tokens within the transaction submitted by them.
+  submit alice do
+    createCmd Token with owner = alice
+
+  bob <- allocateParty "Bob"
+  bobToken <- submit bob do
+    createCmd Token with owner = bob
+
+  -- If a single statement in a Script fails, the whole Script fails at that point.
+  -- To test failure of more than one submission in a single Script, we need a different
+  -- keyword `submitMustFail`, which succeeds when the submitted transaction fails.
+  -- Alice and Bob cannot issue Tokens to each other, as neither has the authority to put
+  -- the other's signature on the Token.
+  submitMustFail alice do
+    createCmd Token with owner = bob
+  submitMustFail bob do
+    createCmd Token with owner = alice
+
+  -- `archive` is symmetric to `create`. Bob and Alice can't archive each other's
+  -- Tokens, but they can archive their own.
+  submitMustFail alice do
+    archiveCmd bobToken
+
+  submit bob do
+    archiveCmd bobToken
+
+-- TOKEN_TEST_1_BEGIN
+token_test_1 = script do
+  alice <- allocateParty "Alice"
+  submit alice do
+    createCmd Token with owner = alice
+-- TOKEN_TEST_1_END
+
+{-
+-- FAILURE_TEST_1_BEGIN
+failing_test_1 = do
+  alice <- allocateParty "Alice"
+  bob <- allocateParty "Bob"
+  submit alice do
+    createCmd Token with owner = bob
+  submit bob do
+    createCmd Token with owner = alice
+-- FAILURE_TEST_1_END
+-}
+
+-- TOKEN_TEST_2_BEGIN
+token_test_2 = script do
+  alice <- allocateParty "Alice"
+  bob <- allocateParty "Bob"
+
+  submitMustFail alice do
+    createCmd Token with owner = bob
+  submitMustFail bob do
+    createCmd Token with owner = alice
+
+  submit alice do
+    createCmd Token with owner = alice
+  submit bob do
+    createCmd Token with owner = bob
+-- TOKEN_TEST_2_END
+
+-- TOKEN_TEST_3_BEGIN
+token_test_3 = script do
+  alice <- allocateParty "Alice"
+  bob <- allocateParty "Bob"
+
+  alice_token <- submit alice do
+    createCmd Token with owner = alice
+
+  submitMustFail bob do
+    archiveCmd alice_token
+
+  submit alice do
+    archiveCmd alice_token
+-- TOKEN_TEST_3_END
+
+-- Examples of Tuples and Lists
+tuple_example = script do
+  -- Grouping three Decimal values using a three-tuple
+  let coordinate_tuple = (1.0 : Decimal, 2.0 : Decimal, 3.0 : Decimal)
+
+  -- Pattern matching to extract values
+  let (cx, cy, cz) = coordinate_tuple
+
+  debug $ "Tuple coordinates: " <> show cx <> ", " <> show cy <> ", " <> show cz
+  return ()
+
+list_example = script do
+  -- Define a list using syntactic sugar
+  let original_list : [Text] = ["One", "Two", "Three"]
+
+  -- The empty list requires a type annotation
+  let empty_list : [Int] = []
+
+  -- Create a new list by prepending "Zero"
+  let new_list = "Zero" :: original_list
+
+  debug $ "Original list: " <> show original_list
+  debug $ "New list: " <> show new_list
+  debug $ "Original list length: " <> show (length original_list)
+  debug $ "New list length: " <> show (length new_list)
+
+  return ()
+
+-- Test for Contract Keys stability
+key_stability_test = script do
+  accountant <- allocateParty "Bob"
+  owner <- allocateParty "Alice"
+  bank_party <- allocateParty "Bank"
+  let bank = Bank with party = bank_party; address = "High Street"; telephone = "012 3456 789"
+  let cash = Cash with currency = "USD"; amount = 100.0
+  
+  -- 1. Initial creation
+  accountCid <- submit accountant do
+    createCmd Account with accountant; owner; bank; number = "ABC123"
+  balanceCid <- submit accountant do
+    let accountKey = AccountKey with accountant; number = "ABC123"; bank_party = bank.party
+    createCmd CashBalance with accountant; cash; account = accountKey
+  
+  -- 2. Accountant updates the Account (archive old, create new)
+  Some account <- queryContractId accountant accountCid
+  let updatedBank = account.bank with telephone = "098 7654 321"
+  let updatedAccount = account with bank = updatedBank
+  
+  -- Archive old account
+  submit accountant do
+    archiveCmd accountCid
+  
+  -- Create new account with updated phone
+  new_accountCid <- submit accountant do
+    createCmd updatedAccount
+  
+  -- 3. Look up using stable key
+  Some balance <- queryContractId accountant balanceCid
+  Some (found_cid, found_account) <- queryContractKey @Account accountant balance.account
+  
+  debug $ "Original account ID: " <> show accountCid
+  debug $ "New account ID: " <> show new_accountCid
+  debug $ "Found account ID via key: " <> show found_cid
+  debug $ "Phone updated to: " <> show found_account.bank.telephone
+  
+  return ()
+
+-- Test for Choices functionality
+choices_test = script do
+  -- Setup parties
+  accountant <- allocateParty "Charlie"
+  alice <- allocateParty "Alice"
+  bank_party <- allocateParty "BankCorp"
+  
+  -- Create bank and account
+  let bank = Bank with party = bank_party; address = "Main St"; telephone = "111-1111"
+  let cash = Cash with currency = "USD"; amount = 100.0
+  
+  -- Create initial account
+  accountCid <- submit accountant do
+    createCmd Account with accountant; owner = alice; bank; number = "ACC001"
+  
+  -- Create cash balance
+  balanceCid <- submit accountant do
+    let accountKey = AccountKey with accountant; number = "ACC001"; bank_party = bank.party
+    createCmd CashBalance with accountant; cash; account = accountKey
+  
+  -- Test 1: Update phone using choice
+  debug "=== Testing UpdatePhone Choice ==="
+  updatedAccountCid <- submit accountant do
+    exerciseCmd accountCid UpdatePhone with newPhone = "222-2222"
+  
+  -- Test 2: Deposit money using choice
+  debug "=== Testing Deposit Choice ==="
+  updatedBalanceCid <- submit accountant do
+    exerciseCmd balanceCid Deposit with amount = 50.0
+  
+  -- Test 3: Check balance using non-consuming choice
+  debug "=== Testing CheckBalance Choice ==="
+  currentBalance <- submit accountant do
+    exerciseCmd updatedBalanceCid CheckBalance
+  
+  debug $ "Current balance: " <> show currentBalance
+  
+  -- Test 4: Simple token creation (без проблемного transfer)
+  debug "=== Testing Token Creation ==="
+  tokenCid <- submit alice do
+    createCmd Token with owner = alice
+  
+  debug "All choices executed successfully!"
+  
+  return ()

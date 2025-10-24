@@ -1,0 +1,127 @@
+module PersonData where
+
+import Daml.Script
+
+data PersonKey = PersonKey with
+   keyIssuer : Party
+   keyDataId : Text
+ deriving (Eq, Show)
+
+template PersonData
+ with
+   issuer : Party  
+   owner : Party    
+   dataId : Text     
+   personalInfo : (Text, Text, Int)
+   addresses : [Text]
+   contact : Optional Text
+ where
+   signatory issuer, owner
+   ensure dataId /= ""
+
+   choice UpdatePersonalInfo : ContractId PersonData
+     with
+       newInfo : (Text, Text, Int)
+     controller owner
+     do
+       create this with personalInfo = newInfo
+
+   choice AddAddress : ContractId PersonData
+     with
+       newAddress : Text
+     controller owner
+     do
+       create this with addresses = newAddress :: addresses
+
+   choice SetContact : ContractId PersonData
+     with
+       newContact : Text
+     controller owner
+     do
+       create this with contact = Some newContact
+
+   choice ClearContact : ContractId PersonData
+     controller owner
+     do
+       create this with contact = None
+
+template PersonDataProposal
+ with
+   proposal : PersonData
+ where
+   signatory proposal.issuer
+   observer proposal.owner 
+  
+   choice Accept : ContractId PersonData
+     controller proposal.owner
+     do
+       create proposal
+
+-- Test script for PersonData workflow
+person_data_test = script do
+  -- Allocate parties
+  issuer <- allocateParty "TrustAuthority"
+  owner <- allocateParty "DataOwner"
+  
+  -- Create PersonData proposal
+  let personData = PersonData with
+        issuer = issuer
+        owner = owner
+        dataId = "ID001"
+        personalInfo = ("John", "Doe", 30)
+        addresses = ["123 Main St"]
+        contact = None
+  
+  -- Create proposal (only issuer signs)
+  proposalCid <- submit issuer do
+    createCmd PersonDataProposal with proposal = personData
+  
+  -- Owner accepts the proposal (creates final PersonData)
+  personDataCid <- submit owner do
+    exerciseCmd proposalCid Accept
+  
+  -- Test updating personal info
+  updatedPersonDataCid <- submit owner do
+    exerciseCmd personDataCid UpdatePersonalInfo with newInfo = ("John", "Smith", 31)
+  
+  -- Test adding address
+  finalPersonDataCid <- submit owner do
+    exerciseCmd updatedPersonDataCid AddAddress with newAddress = "456 Oak Ave"
+  
+  -- Test setting contact
+  withContactCid <- submit owner do
+    exerciseCmd finalPersonDataCid SetContact with newContact = "john.smith@email.com"
+  
+  debug "PersonData workflow completed successfully!"
+  
+  return ()
+-- Test script from Step 5
+test_person_data = script do
+   issuer <- allocateParty "IssuerParty"
+   owner <- allocateParty "OwnerParty"
+  
+   let initialPersonData = PersonData with
+           issuer = issuer
+           owner = owner
+           dataId = "KYC-001"
+           personalInfo = ("Jane", "Doe", 35)
+           addresses = ["10 Downing Street"]
+           contact = Some "old.contact@example.com"
+          
+   proposalCid <- submit issuer do
+       createCmd PersonDataProposal with
+           proposal = initialPersonData
+
+   personCid <- submit owner do
+       exerciseCmd proposalCid Accept
+
+   Some contract <- queryContractId issuer personCid
+   assert (contract.contact == Some "old.contact@example.com")
+   let personKey = PersonKey with keyIssuer = issuer, keyDataId = "KYC-001"
+   newCid <- submit owner do
+     exerciseCmd personCid SetContact with
+         newContact = "new.contact@example.com"
+    
+   Some newContract <- queryContractId owner newCid
+   assert (newContract.contact == Some "new.contact@example.com")
+   return ()
